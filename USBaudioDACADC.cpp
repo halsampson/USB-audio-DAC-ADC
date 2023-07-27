@@ -15,6 +15,7 @@
   const float VoutMax = 3.5933;  
   const float VoutMin = 0.8833;  
   const bool OutInverted = false;
+  const unsigned short MicLevel = 0;
 
   // 5.030 Vusb
   // Microphone Level 0   120 Hz (no effect)
@@ -29,11 +30,13 @@
   const float VoutMax = 3.0397; 
   const float VoutMin = 0.3317;  
   const bool OutInverted = false;
+  const unsigned short MicLevel = 2 * 65535 / 12; // 1.5dB min; 1.5 dB steps
 
-  // set Microphone level >= +1.5dB (anything less mutes)
+  // set Microphone level >= +1.5dB (anything less mutes) 
   // +1.5dB actually amplifies signal X 5 = +14 dB, around ~1.645V
-    //   how disable mic boost?  libusb driver?
-  // has 4.7KΩ input resistor
+    //   how disable mic boost?  libusb driver? -- may need spec (or try CM1x9 endpoints?)
+    //   chip also has AINL/R (not connected or supported by dongle driver)
+  // input has 4.7KΩ input resistor
   // could use with external resistor (divider) to extend range
 
 #elif 1  // blue
@@ -41,6 +44,7 @@
   const float VoutMax = 2.7230; 
   const float VoutMin = 0.6086;  
   const bool OutInverted = true;
+  const unsigned short MicLevel = 40 * 65535 / 100;
 
   // has 4 Hz digital HPF on input
 
@@ -124,6 +128,38 @@ void queueWaveOut() {
   }
 }
 
+void setOutLevel(int wavOutDevID, unsigned short outLevel) {
+  MMRESULT result;
+  HMIXER hMixer;
+  result = mixerOpen(&hMixer, (UINT)wavOutDevID, NULL, 0, MIXER_OBJECTF_WAVEOUT);
+
+  MIXERLINE ml = {0};
+  ml.cbStruct = sizeof(MIXERLINE);
+  ml.dwComponentType = MIXERLINE_COMPONENTTYPE_DST_SPEAKERS;
+  result = mixerGetLineInfo((HMIXEROBJ)hMixer, &ml, MIXER_GETLINEINFOF_COMPONENTTYPE); 
+  if (result) return; // 0x400 = MIXERR_INVALLINE
+
+  MIXERLINECONTROLS mlc = {0};
+  MIXERCONTROL mc = {0};
+  mlc.cbStruct = sizeof(MIXERLINECONTROLS);
+  mlc.dwLineID = ml.dwLineID;
+  mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_VOLUME;
+  mlc.cControls = 1;
+  mlc.pamxctrl = &mc;
+  mlc.cbmxctrl = sizeof(MIXERCONTROL);
+  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE);
+
+  MIXERCONTROLDETAILS mcd = {0};
+  MIXERCONTROLDETAILS_UNSIGNED mcdu = {0};
+  mcdu.dwValue = outLevel; // 0..65535
+  mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
+  mcd.dwControlID = mc.dwControlID;
+  mcd.paDetails = &mcdu;
+  mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
+  mcd.cChannels = 1;  // set all channels
+  result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
+}
+
 void startAudioOut(const char* deviceName) {
   int wavOutDevID = -1;
   int numDevs = waveOutGetNumDevs();
@@ -147,6 +183,13 @@ void startAudioOut(const char* deviceName) {
                     WAV_OUT_CHANNELS * BITS_PER_SAMPLE / 8, BITS_PER_SAMPLE, 0};  
   MMRESULT res = waveOutOpen(&hwo, wavOutDevID, &wfx, NULL, 0, WAVE_FORMAT_DIRECT);
   res = waveOutSetVolume(hwo, 0xFFFFFFFF); // not supported?
+
+  DWORD volume = 0;
+  res = waveOutGetVolume(hwo, &volume);
+  if (res || volume != 0xFFFFFFFF) {
+    printf("Set Headphone Level to 100\a\n");
+    setOutLevel(wavOutDevID, 0xFFFF);  // no help
+  }
   queueWaveOut();
 }
 
@@ -185,6 +228,38 @@ float queueWaveIn() {
   return avg;
 }
 
+void setMicLevel(int wavInDevID, unsigned short micLevel) {
+  MMRESULT result;
+  HMIXER hMixer;
+  result = mixerOpen(&hMixer, (UINT)wavInDevID, NULL, 0, MIXER_OBJECTF_WAVEIN);
+
+  MIXERLINE ml = {0};
+  ml.cbStruct = sizeof(MIXERLINE);
+  ml.dwComponentType = MIXERLINE_COMPONENTTYPE_SRC_MICROPHONE;
+  result = mixerGetLineInfo((HMIXEROBJ)hMixer, &ml, MIXER_GETLINEINFOF_COMPONENTTYPE);
+
+  MIXERLINECONTROLS mlc = {0};
+  MIXERCONTROL mc = {0};
+  mlc.cbStruct = sizeof(MIXERLINECONTROLS);
+  mlc.dwLineID = ml.dwLineID;
+  mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_VOLUME;
+  mlc.cControls = 1;
+  mlc.pamxctrl = &mc;
+  mlc.cbmxctrl = sizeof(MIXERCONTROL);
+  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE);
+
+  MIXERCONTROLDETAILS mcd = {0};
+  MIXERCONTROLDETAILS_UNSIGNED mcdu = {0};
+  mcdu.dwValue = micLevel; // 0..65535
+  mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
+  mcd.hwndOwner = 0;
+  mcd.dwControlID = mc.dwControlID;
+  mcd.paDetails = &mcdu;
+  mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
+  mcd.cChannels = 1;
+  result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
+}
+
 void startAudioIn(const char* deviceName) {
   int wavInDevID = -1;
   int numDevs = waveInGetNumDevs();
@@ -207,14 +282,8 @@ void startAudioIn(const char* deviceName) {
                       WAV_IN_SAMPLE_HZ, WAV_IN_SAMPLE_HZ * WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8,
                       WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8, BITS_PER_SAMPLE, 0};  
   MMRESULT res = waveInOpen(&hwi, wavInDevID, &wfx, NULL, 0, WAVE_FORMAT_DIRECT);
-
-#if 0
-  // set level: vai mixer?
-  mixerGetID();
-  mixerGetLineControls();
-  MIXERCONTROLDETAILS_LISTTEXTA details;
-  mixerSetControlDetails(hmo, &details, MIXER_OBJECTF_WAVEIN);
-#endif
+  
+  setMicLevel(wavInDevID, MicLevel);
 
   queueWaveIn();
 }
@@ -247,3 +316,70 @@ int main() {
   return 0;
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#if 0
+
+void setVolts(float leftV, float rightV, int secs = 5) {
+   #define SAMPLE_HZ 10  // Voltage is off below 40
+   #define CHANNELS 2
+   #define BITS_PER_SAMPLE 16
+
+   const int dataSize = secs * SAMPLE_HZ * CHANNELS * BITS_PER_SAMPLE / 8;
+
+   struct WAVEHEADER {  // 44 bytes
+     char riffID[4];
+     DWORD riffSize;  // file size - 8
+
+     char riffFORMAT[4];
+       char fmtID[4];
+         DWORD fmtSize;
+         PCMWAVEFORMAT pcm;
+
+       char dataID[4];
+         DWORD dataSize;
+   } wavHdr = {{'R','I','F','F'}, 44 - 8 + dataSize, 
+                 {'W','A','V','E'}, 
+                    {'f','m','t',' '}, sizeof(PCMWAVEFORMAT),  
+                     { WAVE_FORMAT_PCM, CHANNELS,
+                       SAMPLE_HZ, SAMPLE_HZ * CHANNELS * BITS_PER_SAMPLE / 8,
+                       CHANNELS * BITS_PER_SAMPLE / 8, BITS_PER_SAMPLE},
+                    {'d','a','t','a'}, dataSize};                 
+
+  FILE* fWav;
+  if (fopen_s(&fWav, "setVolts.wav", "wb")) return; // playing
+
+  fwrite(&wavHdr, sizeof(wavHdr), 1, fWav);
+
+  // 2.237 Vcenter
+  const float Vmax = 3.219;   // TODO: adjust
+  const float Vmin = 1.266;   // drop with Si diode for RT9701 0.8V   ******
+  const float Vrange = Vmax - Vmin;
+
+  struct {
+    short leftVal;
+    short rightVal;
+  } sample = {max(0, min(1, (leftV  - Vmin) / Vrange)) * 65535 - 32768, 
+              max(0, min(1, (rightV - Vmin) / Vrange)) * 65535 - 32768};
+
+  // better in memory -> one disk write!
+  // once!
+  for (int s = 0; s < SAMPLE_HZ * secs; ++s) 
+     fwrite(&sample, sizeof(sample), 1, fWav);
+
+  fclose(fWav);
+}
+
+#endif
