@@ -27,17 +27,23 @@
   #define AudDeviceName "USB Ear-Microphone"
   // Genesi GL632
   // mic input on both Tip and Ring
-  const float VoutMax = 3.0397; 
+  const float VoutMax = 3.0397;  // 2.708 Vpp
   const float VoutMin = 0.3317;  
   const bool OutInverted = false;
-  const unsigned short MicLevel = 2 * 65535 / 12; // 1.5dB min; 1.5 dB steps
+  const unsigned short MicLevel = 2.25 * 65535 / 12; // 1.5 dB min; 1.5 dB steps
 
   // set Microphone level >= +1.5dB (anything less mutes) 
   // +1.5dB actually amplifies signal X 5 = +14 dB, around ~1.645V
     //   how disable mic boost?  libusb driver? -- may need spec (or try CM1x9 endpoints?)
     //   chip also has AINL/R (not connected or supported by dongle driver)
-  // input has 4.7KΩ input resistor
-  // could use with external resistor (divider) to extend range
+  // input has 4.7KΩ input resistor, impedance is very high, no bias?
+  // could use with external resistor (divide / 5) to extend range
+  // or  Headphone Left -> R1 -> R2 / MicIn -> Headphone Right (w/ 5X reduced Headphone signal)
+  //   thermistor and 10K 1% fixed R to measure absolute temperature
+
+  const float VinMax = 1.89435;   // 0.54175 Vpp   gain X 5
+  const float VinCenter = 1.62415;
+  const float VinMin = 1.3526;   
 
 #elif 1  // blue
   #define AudDeviceName "USB Headphone" 
@@ -50,7 +56,10 @@
 
 #elif 1  // bag 
   #define AudDeviceName "USB Audio Device"  //  VID_1B3F&PID_2008  Generalplus Technology Inc.
-  // 4 Hz HPF on mic input -> useful only as DC DAC (and/or AC ADC)
+  // 4 Hz HPF on mic input 
+  // modulate >> 4 Hz using:
+  // Headphone Left -> R1 -> R2 / MicIn -> Headphone Right 
+  // -> no need to remove DC blocking caps for temperature (difference) measurement
 
   // set Microphone level to 40 to match input level to output
   // sine chirp shows ~4 Hz high-pass pop filter -- on chip
@@ -301,12 +310,13 @@ int main() {
       printf("%.3f\n", avg);
     }
 
-    if(_kbhit()) switch(_getch()) {
-      case 'h' : fillWavOutBuffers(5, 5); break;
+    char ch;
+    if(_kbhit()) switch(ch = _getch()) {
+      case 'h' : fillWavOutBuffers(5, 5); break; // high
       case 'c' : fillWavOutBuffers((VoutMin + VoutMax)/2, (VoutMin + VoutMax)/2); break; // center
-      case 'l' : fillWavOutBuffers(0, 0); break;
-      case '1' : fillWavOutBuffers(1, 1); break; // 1V
-      case '2' : fillWavOutBuffers(2, 2); break; // 2V
+      case 'l' : fillWavOutBuffers(0, 0); break; // low
+
+      default : fillWavOutBuffers( 1 + (ch - '0') / 10.,  1 + (ch - '0') / 10.); break;  // 1.0 to 1.9 + other chars
     }
 
     queueWaveOut();
