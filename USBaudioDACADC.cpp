@@ -219,7 +219,9 @@ short wavInBuf[2][WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ];
 HWAVEIN hwi;
 WAVEHDR wih[2]; 
 
-float peakToPeak;
+const int WavOutHz = 40;  // ? attenuation at 10X HPF cutoff? -- minimal with good digital filter
+
+float amplitude;
 
 float queueWaveIn() {
   float avg = 0;
@@ -230,21 +232,42 @@ float queueWaveIn() {
         // average the data 
         const int NumSamples = WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ;
         long long sum = 0;  // beware overflow 
-        long long peakSum = 0, troughSum = 0;
-        int peakCount = 0, troughCount = 0;
+        
+        long long amplSum = 0;
+        int amplSamples = 0;
+
+        int phase = -1;
+        for (int p = 0; p < 1200; ++p)
+          if (wavInBuf[b][p] * wavInBuf[b][0] < 0) {  // sign change
+            phase = p;
+            break;
+          }
+        // printf("%d ", phase);
+
+        for (int p = 1200; p < 2400; ++p)
+          if (wavInBuf[b][p] * wavInBuf[b][1200] < 0) {  // sign change
+            phase = p - 1200;
+            break;
+          }
+       // printf("%d ", phase);
+
+        phase -= WAV_OUT_SAMPLE_HZ / WavOutHz + 16;
 
         for (int s = 0; s < NumSamples; ++s) {
           sum += wavInBuf[b][s];
-          if (wavInBuf[b][s] > peakSum / max(peakCount, 1) / 4) { // ??
-            peakSum += wavInBuf[b][s];
-            ++peakCount;
-          } else if (wavInBuf[b][s] < troughSum / max(troughCount, 1) / 4) {
-            troughSum += wavInBuf[b][s];
-            ++troughCount;
+
+          // for modulated version, need phase (so dot product wwith wavOutBuf)
+          // window the input to avoid ringing
+          // TODO: LPF the output waveform for less ringing
+
+          if ((s - phase) % (WAV_OUT_SAMPLE_HZ / WavOutHz) > 32) { // avoid ringing
+            short outVal = (s - phase) * WavOutHz / WAV_OUT_SAMPLE_HZ % 2 ? 1 : -1;
+            amplSum += wavInBuf[b][s] * outVal;
+            ++amplSamples;
           }
         }
         avg = float(sum) / NumSamples;
-        peakToPeak = float(peakSum) / peakCount - float(troughSum) / troughCount;
+        amplitude = float(amplSum) / amplSamples;
 
         waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
       }
@@ -320,17 +343,37 @@ void startAudioIn(const char* deviceName) {
 }
 
 
-int main() {
-  startAudioIn(AudDeviceName);
-  startAudioOut(AudDeviceName);
+float temp(float ampl){
+  const float attenuation = 0.9;  // from HPF, anti-aliasing, ...   TODO: check with direct connection or known R
+  const int Beta = 3950; // ??
+  const float CtoK = 273.16;
+  const int T0 = 25;
 
+  // ampl = (R - R0) / (R0 + R) * attenuation
+  // R - R0 = ampl / attenuation * (R0 + R)
+  // R * (1 - ampl/ attenuation) = R0 * (1 + ampl/attenuation)
+  // R / R0 = (1 + ampl / attenuation) / (1 - ampl / attenuation)
+  // R / R0 = exp(Beta * (1 / (t + CtoK) - 1/(T0 + CtoK)))
+  // log (R / R0) = Beta * (1 / (t + CtoK) - 1/ (T0 + CtoK))
+  // t = 1 / (log(R / R0) / Beta + 1 / (T0 + CtoK)) - CtoK;
+  // 
+  ampl /= 32767;
+  float temp = 1 / (log((1 + ampl / attenuation) / (1 - ampl / attenuation)) / Beta + 1 / (T0 + CtoK)) - CtoK;
+  return temp;
+}
+
+int main() {
+  
   // wavOutDC(0, 0);
-  wavOutSquare();
+  wavOutSquare(WavOutHz);
+  startAudioOut(AudDeviceName);
+  startAudioIn(AudDeviceName);
+  
  
   while (1) {
     float avg = queueWaveIn();
     if (avg != 0.0) {
-      printf("%.3f\n", avg);
+      printf("%.3f %.2f %.2f\n", avg, amplitude, temp(amplitude));
     }
 
     char ch;
