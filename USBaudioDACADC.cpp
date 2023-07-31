@@ -261,7 +261,7 @@ float queueWaveIn() {
           // TODO: LPF the output waveform for less ringing
 
           if ((s - phase) % (WAV_OUT_SAMPLE_HZ / WavOutHz) > 32) { // avoid ringing
-            short outVal = (s - phase) * WavOutHz / WAV_OUT_SAMPLE_HZ % 2 ? 1 : -1;
+            short outVal = (s - phase) * WavOutHz / WAV_OUT_SAMPLE_HZ % 2 ? -1 : 1;  // TODO - phase can be off 180 ************
             amplSum += wavInBuf[b][s] * outVal;
             ++amplSamples;
           }
@@ -278,7 +278,6 @@ float queueWaveIn() {
       res = waveInAddBuffer(hwi, &wih[b], sizeof(WAVEHDR));
     }
   }
-  MMRESULT res = waveInStart(hwi); 
   return avg;
 }
 
@@ -356,7 +355,7 @@ float temp(float ampl){
   // R / R0 = exp(Beta * (1 / (t + CtoK) - 1/(T0 + CtoK)))
   // log (R / R0) = Beta * (1 / (t + CtoK) - 1/ (T0 + CtoK))
   // t = 1 / (log(R / R0) / Beta + 1 / (T0 + CtoK)) - CtoK;
-  // 
+ 
   ampl /= 32767;
   float temp = 1 / (log((1 + ampl / attenuation) / (1 - ampl / attenuation)) / Beta + 1 / (T0 + CtoK)) - CtoK;
   return temp;
@@ -366,16 +365,18 @@ int main() {
   
   // wavOutDC(0, 0);
   wavOutSquare(WavOutHz);
-  startAudioOut(AudDeviceName);
   startAudioIn(AudDeviceName);
+  startAudioOut(AudDeviceName);
+  MMRESULT res = waveInStart(hwi); // sync
   
- 
+
   while (1) {
     float avg = queueWaveIn();
     if (avg != 0.0) {
-      printf("%.3f %.2f %.2f\n", avg, amplitude, temp(amplitude));
+      printf("%.4f %.2f\n", temp(amplitude), amplitude);
     }
 
+  #if 0
     char ch;
     if(_kbhit()) switch(ch = _getch()) {
       case 'h' : wavOutDC(5, 5); break; // high
@@ -383,7 +384,8 @@ int main() {
       case 'l' : wavOutDC(0, 0); break; // low
 
       default : wavOutDC( 1 + (ch - '0') / 10.,  1 + (ch - '0') / 10.); break;  // 1.0 to 1.9 + other chars
-    }
+    }    
+  #endif
 
     queueWaveOut();
     Sleep(LoopSecs * 1000 / 2);

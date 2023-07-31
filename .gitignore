@@ -9,6 +9,7 @@
 *.user
 *.userosscache
 *.sln.docstates
+enc_temp_folder/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
@@ -361,4 +362,4 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
-/enc_temp_folder/39bedcf35955fa912230f1273f1eb5f5/USBaudioDACADC.cpp
+e
