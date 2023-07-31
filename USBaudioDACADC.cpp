@@ -23,7 +23,7 @@
   // Vcenter =   2.25     (2.2285 open circuit  (reads -549))
   // VinMin =    0.682    0.68 
 
-#elif 1
+#elif 0
   #define AudDeviceName "USB Ear-Microphone"
   // Genesi GL632
   // mic input on both Tip and Ring
@@ -50,7 +50,7 @@
   const float VoutMax = 2.7230; 
   const float VoutMin = 0.6086;  
   const bool OutInverted = true;
-  const unsigned short MicLevel = 40 * 65535 / 100;
+  const unsigned short MicLevel = 0; 
 
   // has 4 Hz digital HPF on input
 
@@ -97,9 +97,7 @@ struct {
  short right;
 } wavOutBuf[2][WAV_OUT_BUF_SECS * WAV_OUT_SAMPLE_HZ];
 
-void fillWavOutBuffers(float leftV, float rightV) { 
-  // TODO: right channel triangle wave when charging: duty cycle indicating temp/time estimate?
-
+void wavOutDC(float leftV, float rightV) { 
   short leftVal, rightVal;
   if (OutInverted) { 
     leftVal =  -(max(0, min(1, (leftV  - VoutMin) / VoutRange)) * 65534 - 32767); // reversed
@@ -113,9 +111,18 @@ void fillWavOutBuffers(float leftV, float rightV) {
     for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
       wavOutBuf[b][s].left = leftVal;
       wavOutBuf[b][s].right = rightVal;
-      // rightVal += b ? 32 : -32;   // beware overflow
     }
 }
+
+void wavOutSquare(int Hz = 480) {
+  for (int b = 0; b < 2; ++b)
+    for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
+      short val = s * Hz / WAV_OUT_SAMPLE_HZ % 2 ? 32767 : - 32767;
+      wavOutBuf[b][s].left = val;
+      wavOutBuf[b][s].right = -val;
+    }
+}
+
 
 HWAVEOUT hwo;
 WAVEHDR woh[2];
@@ -204,7 +211,7 @@ void startAudioOut(const char* deviceName) {
 
 
 #define WAV_IN_BUF_SECS LoopSecs
-#define WAV_IN_SAMPLE_HZ 120 // for 60 Hz notch filtering
+#define WAV_IN_SAMPLE_HZ 48000 // for 60 Hz notch filtering
 #define WAV_IN_CHANNELS 1
 
 short wavInBuf[2][WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ];
@@ -212,17 +219,32 @@ short wavInBuf[2][WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ];
 HWAVEIN hwi;
 WAVEHDR wih[2]; 
 
+float peakToPeak;
+
 float queueWaveIn() {
   float avg = 0;
+  
   for (int b = 0; b < 2; ++b) {
     if (wih[b].dwFlags & WHDR_DONE || !wih[b].dwFlags) {
       if (wih[b].dwFlags & WHDR_DONE) {
         // average the data 
         const int NumSamples = WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ;
-        int sum = 0;  // beware overflow if LoopSecs > 9 * 60
-        for (int s = 0; s < NumSamples; ++s)
-          sum += wavInBuf[b][s]; 
+        long long sum = 0;  // beware overflow 
+        long long peakSum = 0, troughSum = 0;
+        int peakCount = 0, troughCount = 0;
+
+        for (int s = 0; s < NumSamples; ++s) {
+          sum += wavInBuf[b][s];
+          if (wavInBuf[b][s] > peakSum / max(peakCount, 1) / 4) { // ??
+            peakSum += wavInBuf[b][s];
+            ++peakCount;
+          } else if (wavInBuf[b][s] < troughSum / max(troughCount, 1) / 4) {
+            troughSum += wavInBuf[b][s];
+            ++troughCount;
+          }
+        }
         avg = float(sum) / NumSamples;
+        peakToPeak = float(peakSum) / peakCount - float(troughSum) / troughCount;
 
         waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
       }
@@ -302,7 +324,8 @@ int main() {
   startAudioIn(AudDeviceName);
   startAudioOut(AudDeviceName);
 
-  fillWavOutBuffers(0, 0); 
+  // wavOutDC(0, 0);
+  wavOutSquare();
  
   while (1) {
     float avg = queueWaveIn();
@@ -312,11 +335,11 @@ int main() {
 
     char ch;
     if(_kbhit()) switch(ch = _getch()) {
-      case 'h' : fillWavOutBuffers(5, 5); break; // high
-      case 'c' : fillWavOutBuffers((VoutMin + VoutMax)/2, (VoutMin + VoutMax)/2); break; // center
-      case 'l' : fillWavOutBuffers(0, 0); break; // low
+      case 'h' : wavOutDC(5, 5); break; // high
+      case 'c' : wavOutDC((VoutMin + VoutMax)/2, (VoutMin + VoutMax)/2); break; // center
+      case 'l' : wavOutDC(0, 0); break; // low
 
-      default : fillWavOutBuffers( 1 + (ch - '0') / 10.,  1 + (ch - '0') / 10.); break;  // 1.0 to 1.9 + other chars
+      default : wavOutDC( 1 + (ch - '0') / 10.,  1 + (ch - '0') / 10.); break;  // 1.0 to 1.9 + other chars
     }
 
     queueWaveOut();
