@@ -114,16 +114,16 @@ void wavOutDC(float leftV, float rightV) {
     }
 }
 
-void wavOutSquare(int Hz = 480) {
+void wavOutSquare(int Hz = 480, bool inPhase = false) {
   for (int b = 0; b < 2; ++b)
     for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
       short val = s * Hz / WAV_OUT_SAMPLE_HZ % 2 ? 32767 : - 32767;
       wavOutBuf[b][s].left = val;
-      wavOutBuf[b][s].right = -val;
+      wavOutBuf[b][s].right = inPhase ? val : -val;
     }
 }
 
-
+HWAVEIN hwi;
 HWAVEOUT hwo;
 WAVEHDR woh[2];
 
@@ -140,6 +140,7 @@ void queueWaveOut() {
       woh[b].lpData = (LPSTR)&wavOutBuf[b];
       MMRESULT res =  waveOutPrepareHeader(hwo, &woh[b], sizeof(WAVEHDR));
       res = waveOutWrite(hwo, &woh[b], sizeof(WAVEHDR));
+      res = waveInStart(hwi); // for consistent phase
     }
   }
 }
@@ -216,7 +217,6 @@ void startAudioOut(const char* deviceName) {
 
 short wavInBuf[2][WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ];
 
-HWAVEIN hwi;
 WAVEHDR wih[2]; 
 
 const int WavOutHz = 40;  // ? attenuation at 10X HPF cutoff? -- minimal with good digital filter
@@ -237,30 +237,27 @@ float queueWaveIn() {
         int amplSamples = 0;
 
         int phase = -1;
-        for (int p = 0; p < 1200; ++p)
-          if (wavInBuf[b][p] * wavInBuf[b][0] < 0) {  // sign change
-            phase = p;
-            break;
-          }
-        // printf("%d ", phase);
-
         for (int p = 1200; p < 2400; ++p)
           if (wavInBuf[b][p] * wavInBuf[b][1200] < 0) {  // sign change
             phase = p - 1200;
             break;
           }
-       // printf("%d ", phase);
+        static int prevPhase;
+        if (phase != prevPhase)
+          printf("%d\n", prevPhase = phase);
 
-        phase -= WAV_OUT_SAMPLE_HZ / WavOutHz + 16;
+        const int RingingSamples = 32;  // generous - actually ~20?
+
+        phase -= WAV_OUT_SAMPLE_HZ / WavOutHz + RingingSamples / 2;
 
         for (int s = 0; s < NumSamples; ++s) {
           sum += wavInBuf[b][s];
 
           // for modulated version, need phase (so dot product wwith wavOutBuf)
           // window the input to avoid ringing
-          // TODO: LPF the output waveform for less ringing
+          // TODO: try LPF the output waveform for less ringing?
 
-          if ((s - phase) % (WAV_OUT_SAMPLE_HZ / WavOutHz) > 32) { // avoid ringing
+          if ((s - phase) % (WAV_OUT_SAMPLE_HZ / WavOutHz) > RingingSamples) { // avoid ringing
             short outVal = (s - phase) * WavOutHz / WAV_OUT_SAMPLE_HZ % 2 ? -1 : 1;  // TODO - phase can be off 180 ************
             amplSum += wavInBuf[b][s] * outVal;
             ++amplSamples;
@@ -343,8 +340,8 @@ void startAudioIn(const char* deviceName) {
 
 
 float temp(float ampl){
-  const float attenuation = 0.9;  // from HPF, anti-aliasing, ...   TODO: check with direct connection or known R
-  const int Beta = 3950; // ??
+  const float attenuation = 29021.59 / 32767;  // calibrated with wavOutSqaure( inPhase = true)
+  const int Beta = 3950;
   const float CtoK = 273.16;
   const int T0 = 25;
 
@@ -364,12 +361,14 @@ float temp(float ampl){
 int main() {
   
   // wavOutDC(0, 0);
+#if 0  // calibrate attenuation - varies slightly -> could continuosly calibrate ??  TODO
+  wavOutSquare(WavOutHz, true); // calibrate
+#else
   wavOutSquare(WavOutHz);
+#endif
   startAudioIn(AudDeviceName);
   startAudioOut(AudDeviceName);
-  MMRESULT res = waveInStart(hwi); // sync
   
-
   while (1) {
     float avg = queueWaveIn();
     if (avg != 0.0) {
