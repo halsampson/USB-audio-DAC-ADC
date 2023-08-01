@@ -4,8 +4,10 @@
 // with input and output DC blocking capacitors shorted
 //   and mic bias disconnected
 
-// TODO: ?mixer code to set output Speaker level to 100
+// TODO: code to set output Speaker level to 100
 //    waveOutSetVolume() no effect?
+//    mixer Master Volume ont headphone out gain
+
 
 #if 0
   #define AudDeviceName "C-Media"  // C-Media USB Headphone Set
@@ -123,6 +125,21 @@ void wavOutSquare(int Hz = 480, bool inPhase = false) {
     }
 }
 
+void wavOutFilteredSquare(int Hz = 480, bool inPhase = false) {
+  for (int b = 0; b < 2; ++b) {
+    short val = -32767;
+    for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
+      int targetVal = s * Hz / WAV_OUT_SAMPLE_HZ % 2 ? 32767 : -32767;
+      int sign = targetVal > 0 ? 1 : -1;
+      const int steps = 8;
+      val += sign * min(abs(targetVal - val), 32768 / steps);
+      wavOutBuf[b][s].left = val;
+      wavOutBuf[b][s].right = inPhase ? val : -val;
+    }
+  }
+}
+
+
 HWAVEIN hwi;
 HWAVEOUT hwo;
 WAVEHDR woh[2];
@@ -221,12 +238,11 @@ WAVEHDR wih[2];
 
 const int WavOutHz = 40;  // ? attenuation at 10X HPF cutoff? -- minimal with good digital filter
 
-float amplitude;
+float amplitude, avg;
 
-float queueWaveIn() {
-  float avg = 0;
-  
-  for (int b = 0; b < 2; ++b) {
+bool waveInReady() {
+  bool waveInReady = false;
+   for (int b = 0; b < 2; ++b) {
     if (wih[b].dwFlags & WHDR_DONE || !wih[b].dwFlags) {
       if (wih[b].dwFlags & WHDR_DONE) {
         // average the data 
@@ -235,18 +251,23 @@ float queueWaveIn() {
         
         long long amplSum = 0;
         int amplSamples = 0;
+        const int RingingSamples = 24;  // depends on WavOutHz
 
         int phase = -1;
+        // TODO: better find at least two zero crossings / direction
+          // better average several 0-crossings   
+          // TODO: Use inPhase to find correct phase
+        
         for (int p = 1200; p < 2400; ++p)
           if (wavInBuf[b][p] * wavInBuf[b][1200] < 0) {  // sign change
             phase = p - 1200;
             break;
           }
         static int prevPhase;
-        if (phase != prevPhase)
+        if (abs(phase - prevPhase) > RingingSamples / 4) {  // ??
           printf("%d\n", prevPhase = phase);
-
-        const int RingingSamples = 32;  // generous - actually ~20?
+        } else phase = prevPhase; // keep old phase if close
+   
 
         phase -= WAV_OUT_SAMPLE_HZ / WavOutHz + RingingSamples / 2;
 
@@ -255,7 +276,6 @@ float queueWaveIn() {
 
           // for modulated version, need phase (so dot product wwith wavOutBuf)
           // window the input to avoid ringing
-          // TODO: try LPF the output waveform for less ringing?
 
           if ((s - phase) % (WAV_OUT_SAMPLE_HZ / WavOutHz) > RingingSamples) { // avoid ringing
             short outVal = (s - phase) * WavOutHz / WAV_OUT_SAMPLE_HZ % 2 ? -1 : 1;  // TODO - phase can be off 180 ************
@@ -265,6 +285,7 @@ float queueWaveIn() {
         }
         avg = float(sum) / NumSamples;
         amplitude = float(amplSum) / amplSamples;
+        waveInReady = true;
 
         waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
       }
@@ -275,7 +296,7 @@ float queueWaveIn() {
       res = waveInAddBuffer(hwi, &wih[b], sizeof(WAVEHDR));
     }
   }
-  return avg;
+  return waveInReady;
 }
 
 void setMicLevel(int wavInDevID, unsigned short micLevel) {
@@ -316,7 +337,7 @@ void startAudioIn(const char* deviceName) {
   for (int devID = 0; devID < numDevs; ++devID) {
     WAVEINCAPS wic;
     if (waveInGetDevCaps(devID, &wic, sizeof(WAVEINCAPS)) == MMSYSERR_NOERROR) {
-      printf("DeviceID %d: %s\n", devID, wic.szPname);
+      // printf("DeviceID %d: %s\n", devID, wic.szPname);
       if (strstr(wic.szPname, deviceName)) {
         wavInDevID = devID;
         break;
@@ -335,12 +356,12 @@ void startAudioIn(const char* deviceName) {
   
   setMicLevel(wavInDevID, MicLevel);
 
-  queueWaveIn();
+  waveInReady();
 }
 
+ float attenuation;
 
 float temp(float ampl){
-  const float attenuation = 29021.59 / 32767;  // calibrated with wavOutSqaure( inPhase = true)
   const int Beta = 3950;
   const float CtoK = 273.16;
   const int T0 = 25;
@@ -358,38 +379,48 @@ float temp(float ampl){
   return temp;
 }
 
-int main() {
-  
-  // wavOutDC(0, 0);
-#if 0  // calibrate attenuation - varies slightly -> could continuosly calibrate ??  TODO
-  wavOutSquare(WavOutHz, true); // calibrate
-#else
-  wavOutSquare(WavOutHz);
-#endif
-  startAudioIn(AudDeviceName);
-  startAudioOut(AudDeviceName);
-  
-  while (1) {
-    float avg = queueWaveIn();
-    if (avg != 0.0) {
-      printf("%.4f %.2f\n", temp(amplitude), amplitude);
-    }
-
-  #if 0
-    char ch;
-    if(_kbhit()) switch(ch = _getch()) {
-      case 'h' : wavOutDC(5, 5); break; // high
-      case 'c' : wavOutDC((VoutMin + VoutMax)/2, (VoutMin + VoutMax)/2); break; // center
-      case 'l' : wavOutDC(0, 0); break; // low
-
-      default : wavOutDC( 1 + (ch - '0') / 10.,  1 + (ch - '0') / 10.); break;  // 1.0 to 1.9 + other chars
-    }    
-  #endif
-
+float getAmplitude() {
+  while (!waveInReady()) {
     queueWaveOut();
     Sleep(LoopSecs * 1000 / 2);
   }
+  return amplitude;
+}
 
+void flushInBufs() {
+  getAmplitude();
+  getAmplitude();
+}
+
+void calibrate() { // calibrate attenuation - varies slightly -> could continuosly calibrate 
+  wavOutFilteredSquare(WavOutHz, true); // calibrate
+  flushInBufs();
+
+  float lastAmpl = getAmplitude();
+  while (1) {
+    getAmplitude();
+    float change = amplitude - lastAmpl;
+    printf("%.1f ", change);
+    if (fabs(change) < 0.1) {
+      attenuation = -amplitude / 32767;
+      printf("\nAtten: %.5f\n", attenuation);
+      return;
+    }
+    lastAmpl = amplitude;
+  }  
+}
+
+
+int main() {
+  startAudioIn(AudDeviceName);
+  startAudioOut(AudDeviceName);
+
+  calibrate();
+  wavOutFilteredSquare(WavOutHz);
+  flushInBufs();
+  
+  while (1) printf("%.4f\n", temp(getAmplitude()));
+  
   return 0;
 }
 
@@ -404,6 +435,19 @@ int main() {
 
 
 
+
+
+
+# if 0
+    char ch;
+    if(_kbhit()) switch(ch = _getch()) {
+      case 'h' : wavOutDC(5, 5); break; // high
+      case 'c' : wavOutDC((VoutMin + VoutMax)/2, (VoutMin + VoutMax)/2); break; // center
+      case 'l' : wavOutDC(0, 0); break; // low
+
+      default : wavOutDC( 1 + (ch - '0') / 10.,  1 + (ch - '0') / 10.); break;  // 1.0 to 1.9 + other chars
+    }    
+#endif
 
 
 
