@@ -127,7 +127,7 @@ void wavOutSquare(int Hz = 480, bool inPhase = false) {
 
 void wavOutFilteredSquare(int Hz = 480, bool inPhase = false) {
   for (int b = 0; b < 2; ++b) {
-    short val = -32767;
+    short val = 32767; // match last sample
     for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
       int targetVal = s * Hz / WAV_OUT_SAMPLE_HZ % 2 ? 32767 : -32767;
       int sign = targetVal > 0 ? 1 : -1;
@@ -239,6 +239,7 @@ WAVEHDR wih[2];
 const int WavOutHz = 40;  // ? attenuation at 10X HPF cutoff? -- minimal with good digital filter
 
 float amplitude, avg;
+int phase, refPhase;
 
 bool waveInReady() {
   bool waveInReady = false;
@@ -253,7 +254,6 @@ bool waveInReady() {
         int amplSamples = 0;
         const int RingingSamples = 24;  // depends on WavOutHz
 
-        int phase = -1;
         // TODO: better find at least two zero crossings / direction
           // better average several 0-crossings   
           // TODO: Use inPhase to find correct phase
@@ -263,13 +263,8 @@ bool waveInReady() {
             phase = p - 1200;
             break;
           }
-        static int prevPhase;
-        if (abs(phase - prevPhase) > RingingSamples / 4) {  // ??
-          printf("%d\n", prevPhase = phase);
-        } else phase = prevPhase; // keep old phase if close
    
-
-        phase -= WAV_OUT_SAMPLE_HZ / WavOutHz + RingingSamples / 2;
+        int offset = refPhase - WAV_OUT_SAMPLE_HZ / WavOutHz + RingingSamples / 2;
 
         for (int s = 0; s < NumSamples; ++s) {
           sum += wavInBuf[b][s];
@@ -398,28 +393,40 @@ void calibrate() { // calibrate attenuation - varies slightly -> could continuos
 
   float lastAmpl = getAmplitude();
   while (1) {
+    refPhase = phase;
     getAmplitude();
     float change = amplitude - lastAmpl;
-    printf("%.1f ", change);
-    if (fabs(change) < 0.1) {
-      attenuation = -amplitude / 32767;
-      printf("\nAtten: %.5f\n", attenuation);
-      return;
-    }
+    printf("%.2f ", change);
+    if (fabs(change) < 0.1) break;
     lastAmpl = amplitude;
   }  
-}
 
+  attenuation = -amplitude / 32767;
+  printf("\nAtten: %.5f\n", attenuation);
+
+  wavOutFilteredSquare(WavOutHz);
+  flushInBufs();
+}
 
 int main() {
   startAudioIn(AudDeviceName);
   startAudioOut(AudDeviceName);
 
   calibrate();
-  wavOutFilteredSquare(WavOutHz);
-  flushInBufs();
   
-  while (1) printf("%.4f\n", temp(getAmplitude()));
+  while (1) {
+    static float last_t;
+    float t = temp(getAmplitude());
+    printf("%.4f %.4f\n", t, t - last_t);
+    last_t = t;
+
+    if (_kbhit()) switch(_getch()) {
+      case 'c' : calibrate();
+      case 'p' : printf("%d %d\n", refPhase, phase); break;
+        // check phase vs. refPhase (will be noisy at 0 signal near 25°C)
+        // waveOut and waveIn clocks should be same, but beware missed buffer swaps?
+    }
+  }
   
   return 0;
 }
