@@ -4,6 +4,8 @@
 // with input and output DC blocking capacitors shorted
 //   and mic bias disconnected
 
+// TODO: faster sampling to WAV file -- detect breathing
+
 // TODO: code to set output Speaker level to 100
 //    waveOutSetVolume() no effect?
 //    mixer Master Volume ont headphone out gain
@@ -173,6 +175,17 @@ void setOutLevel(int wavOutDevID, unsigned short outLevel) {
   result = mixerGetLineInfo((HMIXEROBJ)hMixer, &ml, MIXER_GETLINEINFOF_COMPONENTTYPE); 
   if (result) return; // 0x400 = MIXERR_INVALLINE
 
+  MIXERLINECONTROLS mlineControls;            // contains information about the controls of an audio line
+  MIXERCONTROL controlArray[8];
+  mlineControls.dwLineID  = ml.dwLineID;      // unique audio line identifier
+  mlineControls.cControls = ml.cControls;     // number of controls associated with the line
+  mlineControls.pamxctrl  = controlArray;     // points to the first MIXERCONTROL structure to be filled
+  mlineControls.cbStruct  = sizeof(MIXERLINECONTROLS);
+  mlineControls.cbmxctrl  = sizeof(MIXERCONTROL);
+  // Get information on ALL controls associated with the specified audio line
+  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlineControls, MIXER_OBJECTF_MIXER | MIXER_GETLINECONTROLSF_ALL);
+  // 0: Mute  1: Volume
+
   MIXERLINECONTROLS mlc = {0};
   MIXERCONTROL mc = {0};
   mlc.cbStruct = sizeof(MIXERLINECONTROLS);
@@ -218,11 +231,12 @@ void startAudioOut(const char* deviceName) {
   MMRESULT res = waveOutOpen(&hwo, wavOutDevID, &wfx, NULL, 0, WAVE_FORMAT_DIRECT);
   res = waveOutSetVolume(hwo, 0xFFFFFFFF); // not supported?
 
+  setOutLevel(wavOutDevID, 0xFFFF);  // no help
+
   DWORD volume = 0;
   res = waveOutGetVolume(hwo, &volume);
   if (res || volume != 0xFFFFFFFF) {
     printf("Set Headphone Level to 100\a\n");
-    setOutLevel(wavOutDevID, 0xFFFF);  // no help
   }
   queueWaveOut();
 }
@@ -255,15 +269,15 @@ bool waveInReady() {
         const int RingingSamples = 24;  // depends on WavOutHz
 
         // TODO: better find at least two zero crossings / direction
-          // better average several 0-crossings   
-          // TODO: Use inPhase to find correct phase
+          // better average several 0-crossings 
+        // best if works evn with small amplitude: autocorrelate
         
         for (int p = 1200; p < 2400; ++p)
           if (wavInBuf[b][p] * wavInBuf[b][1200] < 0) {  // sign change
             phase = p - 1200;
             break;
           }
-   
+  
         int offset = refPhase - WAV_OUT_SAMPLE_HZ / WavOutHz + RingingSamples / 2;
 
         for (int s = 0; s < NumSamples; ++s) {
@@ -281,7 +295,6 @@ bool waveInReady() {
         avg = float(sum) / NumSamples;
         amplitude = float(amplSum) / amplSamples;
         waveInReady = true;
-
         waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
       }
       
@@ -304,8 +317,38 @@ void setMicLevel(int wavInDevID, unsigned short micLevel) {
   ml.dwComponentType = MIXERLINE_COMPONENTTYPE_SRC_MICROPHONE;
   result = mixerGetLineInfo((HMIXEROBJ)hMixer, &ml, MIXER_GETLINEINFOF_COMPONENTTYPE);
 
+  MIXERLINECONTROLS mlineControls;            // contains information about the controls of an audio line
+  MIXERCONTROL controlArray[8];
+  mlineControls.dwLineID  = ml.dwLineID;      // unique audio line identifier
+  mlineControls.cControls = ml.cControls;     // number of controls associated with the line
+  mlineControls.pamxctrl  = controlArray;     // points to the first MIXERCONTROL structure to be filled
+  mlineControls.cbStruct  = sizeof(MIXERLINECONTROLS);
+  mlineControls.cbmxctrl  = sizeof(MIXERCONTROL);
+  // Get information on ALL controls associated with the specified audio line
+  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlineControls, MIXER_OBJECTF_MIXER | MIXER_GETLINECONTROLSF_ALL);
+  // 0: Mute = AGC??  1: Volume
+
   MIXERLINECONTROLS mlc = {0};
   MIXERCONTROL mc = {0};
+  mlc.cbStruct = sizeof(MIXERLINECONTROLS);
+  mlc.dwLineID = ml.dwLineID;
+  mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_MUTE;
+  mlc.cControls = 1;
+  mlc.pamxctrl = &mc;
+  mlc.cbmxctrl = sizeof(MIXERCONTROL);
+  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE);
+
+  MIXERCONTROLDETAILS mcd = {0};
+  MIXERCONTROLDETAILS_UNSIGNED mcdu = {0};
+  mcdu.dwValue = 0; 
+  mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
+  mcd.hwndOwner = 0;
+  mcd.dwControlID = mc.dwControlID;
+  mcd.paDetails = &mcdu;
+  mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
+  mcd.cChannels = 1;
+  result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
+
   mlc.cbStruct = sizeof(MIXERLINECONTROLS);
   mlc.dwLineID = ml.dwLineID;
   mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_VOLUME;
@@ -314,8 +357,6 @@ void setMicLevel(int wavInDevID, unsigned short micLevel) {
   mlc.cbmxctrl = sizeof(MIXERCONTROL);
   result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE);
 
-  MIXERCONTROLDETAILS mcd = {0};
-  MIXERCONTROLDETAILS_UNSIGNED mcdu = {0};
   mcdu.dwValue = micLevel; // 0..65535
   mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
   mcd.hwndOwner = 0;
@@ -388,6 +429,7 @@ void flushInBufs() {
 }
 
 void calibrate() { // calibrate attenuation - varies slightly -> could continuosly calibrate 
+  printf("Calibrating ...\n");
   wavOutFilteredSquare(WavOutHz, true); // calibrate
   flushInBufs();
 
@@ -417,13 +459,15 @@ int main() {
   while (1) {
     static float last_t;
     float t = temp(getAmplitude());
-    printf("%.4f %.4f\n", t, t - last_t);
+    printf("%.4f %+.4f %d\n", t, t - last_t, phase);
     last_t = t;
+
+    if (abs(phase - refPhase) > 32 && fabs(amplitude) > 512)
+      calibrate();
 
     if (_kbhit()) switch(_getch()) {
       case 'c' : calibrate();
-      case 'p' : printf("%d %d\n", refPhase, phase); break;
-        // check phase vs. refPhase (will be noisy at 0 signal near 25°C)
+      case 'p' : printf("%d %d\n", refPhase, phase); break; // check phase vs. refPhase: Note: extra 0-crossings near 0 amplitude (25°C)
         // waveOut and waveIn clocks should be same, but beware missed buffer swaps?
     }
   }
