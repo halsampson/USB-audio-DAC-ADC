@@ -128,6 +128,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="USBaudioDACADC.cpp" />
+    <ClCompile Include="waveIn.cpp" />
+    <ClCompile Include="waveOut.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="waveIn.h" />
+    <ClInclude Include="waveOut.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

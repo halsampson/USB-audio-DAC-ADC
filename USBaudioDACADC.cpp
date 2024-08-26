@@ -6,9 +6,13 @@
 
 // TODO: faster sampling to WAV file -- detect breathing
 
-// TODO: code to set output Speaker level to 100
-//    waveOutSetVolume() no effect?
-//    mixer Master Volume ont headphone out gain
+#include <windows.h>
+#include <conio.h>
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#include "wavein.h"
+#include "waveOut.h"
 
 
 #if 0
@@ -49,7 +53,7 @@
   const float VinCenter = 1.62415;
   const float VinMin = 1.3526;   
 
-#elif 1  // blue
+#elif 0  // blue
   #define AudDeviceName "USB Headphone" 
   const float VoutMax = 2.7230; 
   const float VoutMin = 0.6086;  
@@ -58,14 +62,14 @@
 
   // has 4 Hz digital HPF on input
 
-#elif 1  // bag 
+#elif 1  // bag - most
   #define AudDeviceName "USB Audio Device"  //  VID_1B3F&PID_2008  Generalplus Technology Inc.
   // 4 Hz HPF on mic input 
   // modulate >> 4 Hz using:
   // Headphone Left -> R1 -> R2 / MicIn -> Headphone Right 
   // -> no need to remove DC blocking caps for temperature (difference) measurement
 
-  // set Microphone level to 40 to match input level to output
+  // ?set Microphone level to 40 to match input level to output??
   // sine chirp shows ~4 Hz high-pass pop filter -- on chip
   //   -> DC is digitally blocked
   // ?option to disable pop filter -- need spec!
@@ -73,54 +77,37 @@
   const float VoutMax = 2.6826;   // TODO: gain from Vcenter depends on SAMPLE_HZ (filter?) and history
   const float VoutMin = 0.6270;  
   const bool OutInverted = true;
+  const unsigned short MicLevel = 65535- 20000; // max   "AGC" = Mic Boost? on also  TODO
+#elif 0
+   #define AudDeviceName "USB PnP Sound Device"
 #endif
 
-  const float VoutRange = VoutMax - VoutMin; 
+const float VoutRange = VoutMax - VoutMin; 
 
 // Uses USB dongle with CM108/119
 // turn off AGC = 10X boost
 //   blocking caps removed
 
-#include <windows.h>
-#include <conio.h>
-#include <stdio.h>
-#include <math.h>
-#include <mmsystem.h>
-#pragma comment(lib, "Winmm.lib")
-
-const int LoopSecs = 1; // beware possible overflow if LoopSecs > 9 * 60
-
-#define BITS_PER_SAMPLE 16
-
-#define WAV_OUT_BUF_SECS 1
-#define WAV_OUT_SAMPLE_HZ 48000  // Voltage range is reduced below 44100
-#define WAV_OUT_CHANNELS 2
-
-struct {
- short left;
- short right;
-} wavOutBuf[2][WAV_OUT_BUF_SECS * WAV_OUT_SAMPLE_HZ];
-
 void wavOutDC(float leftV, float rightV) { 
-  short leftVal, rightVal;
+  short left, right;
   if (OutInverted) { 
-    leftVal =  -(max(0, min(1, (leftV  - VoutMin) / VoutRange)) * 65534 - 32767); // reversed
-    rightVal = -(max(0, min(1, (rightV - VoutMin) / VoutRange)) * 65534 - 32767);
+    left =  -(max(0, min(1, (leftV  - VoutMin) / VoutRange)) * 65534 - 32767); // reversed
+    right = -(max(0, min(1, (rightV - VoutMin) / VoutRange)) * 65534 - 32767);
   } else {
-    leftVal =  max(0, min(1, (leftV  - VoutMin) / VoutRange)) * 65535 - 32768;
-    rightVal = max(0, min(1, (rightV - VoutMin) / VoutRange)) * 65535 - 32768;
+    left =  max(0, min(1, (leftV  - VoutMin) / VoutRange)) * 65535 - 32768;
+    right = max(0, min(1, (rightV - VoutMin) / VoutRange)) * 65535 - 32768;
   }
 
-  for (int b = 0; b < 2; ++b)
-    for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
-      wavOutBuf[b][s].left = leftVal;
-      wavOutBuf[b][s].right = rightVal;
+  for (int b = 0; b < NUM_WAV_OUT_BUFFERS; ++b)
+    for (int s = 0; s < WAV_OUT_BUFFER_SAMPLES; ++s) {
+      wavOutBuf[b][s].left = left;
+      wavOutBuf[b][s].right = right;
     }
 }
 
 void wavOutSquare(int Hz = 480, bool inPhase = false) {
-  for (int b = 0; b < 2; ++b)
-    for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
+  for (int b = 0; b < NUM_WAV_OUT_BUFFERS; ++b)
+    for (int s = 0; s < WAV_OUT_BUFFER_SAMPLES; ++s) {
       short val = s * Hz / WAV_OUT_SAMPLE_HZ % 2 ? 32767 : - 32767;
       wavOutBuf[b][s].left = val;
       wavOutBuf[b][s].right = inPhase ? val : -val;
@@ -128,9 +115,9 @@ void wavOutSquare(int Hz = 480, bool inPhase = false) {
 }
 
 void wavOutFilteredSquare(int Hz = 480, bool inPhase = false) {
-  for (int b = 0; b < 2; ++b) {
+  for (int b = 0; b < NUM_WAV_OUT_BUFFERS; ++b) {
     short val = 32767; // match last sample
-    for (int s = 0; s < WAV_OUT_SAMPLE_HZ * WAV_OUT_BUF_SECS; ++s) {
+    for (int s = 0; s < WAV_OUT_BUFFER_SAMPLES; ++s) {
       int targetVal = s * Hz / WAV_OUT_SAMPLE_HZ % 2 ? 32767 : -32767;
       int sign = targetVal > 0 ? 1 : -1;
       const int steps = 8;
@@ -141,334 +128,174 @@ void wavOutFilteredSquare(int Hz = 480, bool inPhase = false) {
   }
 }
 
-
-HWAVEIN hwi;
-HWAVEOUT hwo;
-WAVEHDR woh[2];
-
-void queueWaveOut() {
-  for (int b = 0; b < 2; ++b) {
-    if (woh[b].dwFlags & WHDR_DONE || !woh[b].dwFlags) {
-      if (woh[b].dwFlags & WHDR_DONE)
-        waveOutUnprepareHeader(hwo, &woh[b], sizeof(WAVEHDR));
-
-      // TODO: can change next fill data
-      woh[b].dwBufferLength = WAV_OUT_BUF_SECS * WAV_OUT_SAMPLE_HZ * WAV_OUT_CHANNELS * BITS_PER_SAMPLE / 8;
-      woh[b].dwFlags = WHDR_BEGINLOOP | WHDR_ENDLOOP; 
-      woh[b].dwLoops = LoopSecs / WAV_OUT_BUF_SECS;
-      woh[b].lpData = (LPSTR)&wavOutBuf[b];
-      MMRESULT res =  waveOutPrepareHeader(hwo, &woh[b], sizeof(WAVEHDR));
-      res = waveOutWrite(hwo, &woh[b], sizeof(WAVEHDR));
-      res = waveInStart(hwi); // for consistent phase
-    }
-  }
-}
-
-void setOutLevel(int wavOutDevID, unsigned short outLevel) {
-  MMRESULT result;
-  HMIXER hMixer;
-  result = mixerOpen(&hMixer, (UINT)wavOutDevID, NULL, 0, MIXER_OBJECTF_WAVEOUT);
-
-  MIXERLINE ml = {0};
-  ml.cbStruct = sizeof(MIXERLINE);
-  ml.dwComponentType = MIXERLINE_COMPONENTTYPE_DST_SPEAKERS;
-  result = mixerGetLineInfo((HMIXEROBJ)hMixer, &ml, MIXER_GETLINEINFOF_COMPONENTTYPE); 
-  if (result) return; // 0x400 = MIXERR_INVALLINE
-
-  MIXERLINECONTROLS mlineControls;            // contains information about the controls of an audio line
-  MIXERCONTROL controlArray[8];
-  mlineControls.dwLineID  = ml.dwLineID;      // unique audio line identifier
-  mlineControls.cControls = ml.cControls;     // number of controls associated with the line
-  mlineControls.pamxctrl  = controlArray;     // points to the first MIXERCONTROL structure to be filled
-  mlineControls.cbStruct  = sizeof(MIXERLINECONTROLS);
-  mlineControls.cbmxctrl  = sizeof(MIXERCONTROL);
-  // Get information on ALL controls associated with the specified audio line
-  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlineControls, MIXER_OBJECTF_MIXER | MIXER_GETLINECONTROLSF_ALL);
-  // 0: Mute  1: Volume
-
-  MIXERLINECONTROLS mlc = {0};
-  MIXERCONTROL mc = {0};
-  mlc.cbStruct = sizeof(MIXERLINECONTROLS);
-  mlc.dwLineID = ml.dwLineID;
-  mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_VOLUME;
-  mlc.cControls = 1;
-  mlc.pamxctrl = &mc;
-  mlc.cbmxctrl = sizeof(MIXERCONTROL);
-  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE);
-
-  MIXERCONTROLDETAILS mcd = {0};
-  MIXERCONTROLDETAILS_UNSIGNED mcdu = {0};
-  mcdu.dwValue = outLevel; // 0..65535
-  mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
-  mcd.dwControlID = mc.dwControlID;
-  mcd.paDetails = &mcdu;
-  mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
-  mcd.cChannels = 1;  // set all channels
-  result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
-}
-
-void startAudioOut(const char* deviceName) {
-  int wavOutDevID = -1;
-  int numDevs = waveOutGetNumDevs();
-  for (int devID = 0; devID < numDevs; ++devID) {
-    WAVEOUTCAPS woc;
-    if (waveOutGetDevCaps(devID, &woc, sizeof(WAVEOUTCAPS)) == MMSYSERR_NOERROR) {
-      // printf("DeviceID %d: %s\n", devID, woc.szPname);
-      if (strstr(woc.szPname, deviceName)) {
-        wavOutDevID = devID;
-        break;
-      }
-    }
-  }
-  if (wavOutDevID == -1) {
-    printf("Output %s not found\n", deviceName);
-    return;
-  }
-
-  WAVEFORMATEX wfx = {WAVE_FORMAT_PCM, WAV_OUT_CHANNELS,
-                    WAV_OUT_SAMPLE_HZ, WAV_OUT_SAMPLE_HZ * WAV_OUT_CHANNELS * BITS_PER_SAMPLE / 8,
-                    WAV_OUT_CHANNELS * BITS_PER_SAMPLE / 8, BITS_PER_SAMPLE, 0};  
-  MMRESULT res = waveOutOpen(&hwo, wavOutDevID, &wfx, NULL, 0, WAVE_FORMAT_DIRECT);
-  res = waveOutSetVolume(hwo, 0xFFFFFFFF); // not supported?
-
-  setOutLevel(wavOutDevID, 0xFFFF);  // no help
-
-  DWORD volume = 0;
-  res = waveOutGetVolume(hwo, &volume);
-  if (res || volume != 0xFFFFFFFF) {
-    printf("Set Headphone Level to 100\a\n");
-  }
-  queueWaveOut();
-}
-
-
-#define WAV_IN_BUF_SECS LoopSecs
-#define WAV_IN_SAMPLE_HZ 48000 // for 60 Hz notch filtering
-#define WAV_IN_CHANNELS 1
-
-short wavInBuf[2][WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ];
-
-WAVEHDR wih[2]; 
-
-const int WavOutHz = 40;  // ? attenuation at 10X HPF cutoff? -- minimal with good digital filter
-
 float amplitude, avg;
-int phase, refPhase;
 
-bool waveInReady() {
-  bool waveInReady = false;
-   for (int b = 0; b < 2; ++b) {
-    if (wih[b].dwFlags & WHDR_DONE || !wih[b].dwFlags) {
-      if (wih[b].dwFlags & WHDR_DONE) {
-        // average the data 
-        const int NumSamples = WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ;
-        long long sum = 0;  // beware overflow 
-        
-        long long amplSum = 0;
-        int amplSamples = 0;
-        const int RingingSamples = 24;  // depends on WavOutHz
 
-        // TODO: better find at least two zero crossings / direction
-          // better average several 0-crossings 
-        // best if works evn with small amplitude: autocorrelate
+const int WavOutHz = 480; // well above 4Hz HPF
+const int CycleLen = WAV_OUT_SAMPLE_HZ / WavOutHz;
+
+short* waveIn;
+
+void squareAmpl() {
+  long long amplSum = 0;
+  int amplSamples = 0;
+  const int RingingSamples = 24;  // depends on WAV_OUT_SAMPLE_HZ TODO
+  int phase, refPhase = 0;
+
+  // TODO: better find at least two zero crossings / direction
+    // better average several 0-crossings 
+  // best if works even with small amplitude: autocorrelate
         
-        for (int p = 1200; p < 2400; ++p)
-          if (wavInBuf[b][p] * wavInBuf[b][1200] < 0) {  // sign change
-            phase = p - 1200;
-            break;
-          }
+  for (int p = 1200; p < 2400; ++p)
+    if (waveIn[p] * waveIn[1200] < 0) {  // sign change
+      phase = p - 1200;
+      break;
+    }
   
-        int offset = refPhase - WAV_OUT_SAMPLE_HZ / WavOutHz + RingingSamples / 2;
+  int offset = refPhase - CycleLen + RingingSamples / 2;
 
-        for (int s = 0; s < NumSamples; ++s) {
-          sum += wavInBuf[b][s];
+  long long sum = 0;  // beware overflow 
+  for (int s = 0; s < WAV_OUT_BUFFER_SAMPLES; ++s) {
+    sum += waveIn[s];
 
-          // for modulated version, need phase (so dot product wwith wavOutBuf)
-          // window the input to avoid ringing
+    // for modulated version, need phase (so dot product wwith wavOutBuf)
+    // window the input to avoid ringing
 
-          if ((s - phase) % (WAV_OUT_SAMPLE_HZ / WavOutHz) > RingingSamples) { // avoid ringing
-            short outVal = (s - phase) * WavOutHz / WAV_OUT_SAMPLE_HZ % 2 ? -1 : 1;  // TODO - phase can be off 180 ************
-            amplSum += wavInBuf[b][s] * outVal;
-            ++amplSamples;
-          }
-        }
-        avg = float(sum) / NumSamples;
-        amplitude = float(amplSum) / amplSamples;
-        waveInReady = true;
-        waveInUnprepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
-      }
-      
-      wih[b].dwBufferLength = WAV_IN_BUF_SECS * WAV_IN_SAMPLE_HZ * WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8;
-      wih[b].lpData = (LPSTR)&wavInBuf[b];
-      MMRESULT res = waveInPrepareHeader(hwi, &wih[b], sizeof(WAVEHDR));
-      res = waveInAddBuffer(hwi, &wih[b], sizeof(WAVEHDR));
+    if ((s - phase) % (CycleLen) > RingingSamples) { // avoid ringing
+      short outVal = (s - phase) * CycleLen % 2 ? -1 : 1;  // TODO - phase can be off 180 ************
+      amplSum += waveIn[s] * outVal;
+      ++amplSamples;
     }
   }
-  return waveInReady;
+  amplitude = float(amplSum) / amplSamples;
 }
 
-void setMicLevel(int wavInDevID, unsigned short micLevel) {
-  MMRESULT result;
-  HMIXER hMixer;
-  result = mixerOpen(&hMixer, (UINT)wavInDevID, NULL, 0, MIXER_OBJECTF_WAVEIN);
+int phase;
 
-  MIXERLINE ml = {0};
-  ml.cbStruct = sizeof(MIXERLINE);
-  ml.dwComponentType = MIXERLINE_COMPONENTTYPE_SRC_MICROPHONE;
-  result = mixerGetLineInfo((HMIXEROBJ)hMixer, &ml, MIXER_GETLINEINFOF_COMPONENTTYPE);
-
-  MIXERLINECONTROLS mlineControls;            // contains information about the controls of an audio line
-  MIXERCONTROL controlArray[8];
-  mlineControls.dwLineID  = ml.dwLineID;      // unique audio line identifier
-  mlineControls.cControls = ml.cControls;     // number of controls associated with the line
-  mlineControls.pamxctrl  = controlArray;     // points to the first MIXERCONTROL structure to be filled
-  mlineControls.cbStruct  = sizeof(MIXERLINECONTROLS);
-  mlineControls.cbmxctrl  = sizeof(MIXERCONTROL);
-  // Get information on ALL controls associated with the specified audio line
-  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlineControls, MIXER_OBJECTF_MIXER | MIXER_GETLINECONTROLSF_ALL);
-  // 0: Mute = AGC??  1: Volume
-
-  MIXERLINECONTROLS mlc = {0};
-  MIXERCONTROL mc = {0};
-  mlc.cbStruct = sizeof(MIXERLINECONTROLS);
-  mlc.dwLineID = ml.dwLineID;
-  mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_MUTE;
-  mlc.cControls = 1;
-  mlc.pamxctrl = &mc;
-  mlc.cbmxctrl = sizeof(MIXERCONTROL);
-  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE);
-
-  MIXERCONTROLDETAILS mcd = {0};
-  MIXERCONTROLDETAILS_UNSIGNED mcdu = {0};
-  mcdu.dwValue = 0; 
-  mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
-  mcd.hwndOwner = 0;
-  mcd.dwControlID = mc.dwControlID;
-  mcd.paDetails = &mcdu;
-  mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
-  mcd.cChannels = 1;
-  result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
-
-  mlc.cbStruct = sizeof(MIXERLINECONTROLS);
-  mlc.dwLineID = ml.dwLineID;
-  mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_VOLUME;
-  mlc.cControls = 1;
-  mlc.pamxctrl = &mc;
-  mlc.cbmxctrl = sizeof(MIXERCONTROL);
-  result = mixerGetLineControls((HMIXEROBJ) hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE);
-
-  mcdu.dwValue = micLevel; // 0..65535
-  mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
-  mcd.hwndOwner = 0;
-  mcd.dwControlID = mc.dwControlID;
-  mcd.paDetails = &mcdu;
-  mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
-  mcd.cChannels = 1;
-  result = mixerSetControlDetails((HMIXEROBJ) hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
+void simpleAmplitude() {
+  // average the data
+  long long sum = 0, sal1 = 0;  // beware overflow 
+  for (int s = phase; s < phase + BufferSamples - CycleLen; ++s) {
+    sum  += waveIn[s];
+    sal1 += waveIn[s] * ((s - phase) % CycleLen < CycleLen / 2 ? 1 : -1);  // * Walsh SAL(1)
+  }
+        
+  amplitude = float(sal1 - sum) / (BufferSamples - CycleLen);  // DC removed
 }
 
-void startAudioIn(const char* deviceName) {
-  int wavInDevID = -1;
-  int numDevs = waveInGetNumDevs();
-  for (int devID = 0; devID < numDevs; ++devID) {
-    WAVEINCAPS wic;
-    if (waveInGetDevCaps(devID, &wic, sizeof(WAVEINCAPS)) == MMSYSERR_NOERROR) {
-      // printf("DeviceID %d: %s\n", devID, wic.szPname);
-      if (strstr(wic.szPname, deviceName)) {
-        wavInDevID = devID;
-        break;
-      }
+const int MaxVal = 16384;   // allows 2:1 ratio (down to 5K ohm = 10C)
+volatile float r0Peak = MaxVal, thermPeak;
+
+void wavOutTriangle() {
+  for (int b = 0; b < NUM_WAV_OUT_BUFFERS; ++b) {
+    for (int s = 0; s < WAV_OUT_BUFFER_SAMPLES; ++s) {
+      float triangle = (1 - float(abs(s % CycleLen - CycleLen / 2)) / (CycleLen / 4));
+      float dither = (float)rand() / RAND_MAX - 0.5f;
+      wavOutBuf[b][s].left = triangle * r0Peak + dither; 
+      wavOutBuf[b][s].right = triangle * thermPeak - dither;
     }
   }
-  if (wavInDevID == -1) {
-    printf("Input %s not found\n", deviceName);
-    return;
-  }
-
-  WAVEFORMATEX wfx = {WAVE_FORMAT_PCM, WAV_IN_CHANNELS,
-                      WAV_IN_SAMPLE_HZ, WAV_IN_SAMPLE_HZ * WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8,
-                      WAV_IN_CHANNELS * BITS_PER_SAMPLE / 8, BITS_PER_SAMPLE, 0};  
-  MMRESULT res = waveInOpen(&hwi, wavInDevID, &wfx, NULL, 0, WAVE_FORMAT_DIRECT);
-  
-  setMicLevel(wavInDevID, MicLevel);
-
-  waveInReady();
 }
 
- float attenuation;
+float loopGain;
 
-float temp(float ampl){
+void waveInCallback(WAVEHDR* wh) {
+  waveIn = (short*)wh->lpData;
+  simpleAmplitude();
+
+  // TODO: servo should track / predict (constant) temperature slew ***********
+  // TODO: PID D vs. overshoot?
+  static float lastAmplitude;
+  thermPeak += loopGain * amplitude;  // simple P servo
+  lastAmplitude = amplitude;
+  wavOutTriangle();
+}
+
+
+// TODO: servo L/R out of phase output amplitudes for minimum mic input signal
+//   --> R / R0 = L amplitude / R amplitude
+
+// Ring = Red = Right = Thermistor \______ Mic In (mono)
+// Tip = White = Left = 10K ohm    /
+
+float temp(){
   const int Beta = 3950;
   const float CtoK = 273.16;
   const int T0 = 25;
-
-  // ampl = (R - R0) / (R0 + R) * attenuation
-  // R - R0 = ampl / attenuation * (R0 + R)
-  // R * (1 - ampl/ attenuation) = R0 * (1 + ampl/attenuation)
-  // R / R0 = (1 + ampl / attenuation) / (1 - ampl / attenuation)
+  
+  // Rm = 3K ohm electret bias resistor on mic input (most)
   // R / R0 = exp(Beta * (1 / (t + CtoK) - 1/(T0 + CtoK)))
   // log (R / R0) = Beta * (1 / (t + CtoK) - 1/ (T0 + CtoK))
+  // 1/T = 1/T0 + (1/β) * ln(R/R0)
   // t = 1 / (log(R / R0) / Beta + 1 / (T0 + CtoK)) - CtoK;
- 
-  ampl /= 32767;
-  float temp = 1 / (log((1 + ampl / attenuation) / (1 - ampl / attenuation)) / Beta + 1 / (T0 + CtoK)) - CtoK;
+
+  float temp = 1 / (log(-thermPeak / r0Peak) / Beta + 1 / (T0 + CtoK)) - CtoK; // check log
   return temp;
 }
 
-float getAmplitude() {
-  while (!waveInReady()) {
-    queueWaveOut();
-    Sleep(LoopSecs * 1000 / 2);
-  }
-  return amplitude;
+short peak;
+
+int outInPhase() { 
+  int phase = 0;
+  peak = -32768;
+  for (int s = 0; s < CycleLen; ++s)
+    if (waveIn[s] > peak) {
+      peak = waveIn[s];
+      phase = s;
+    }
+  return (phase + CycleLen * 3 / 4) % CycleLen;
+  // check also zero-crossings --> float phase?
 }
 
-void flushInBufs() {
-  getAmplitude();
-  getAmplitude();
+const int SamplingMs = 1000 * NUM_WAV_IN_BUFFERS * BufferSamples / WAV_IN_SAMPLE_HZ;
+
+void setPhase() {
+  loopGain = 0;
+  thermPeak = MaxVal; // in phase
+  Sleep(200 + SamplingMs);  // let caps settle
+  
+  printf("   %d %d %.0f\n", phase = outInPhase(), peak, amplitude); // Determine out:in phase
+  // peak should be well below 32767 else adjust gain (Out level 28)  TODO
 }
 
-void calibrate() { // calibrate attenuation - varies slightly -> could continuosly calibrate 
-  printf("Calibrating ...\n");
-  wavOutFilteredSquare(WavOutHz, true); // calibrate
-  flushInBufs();
 
-  float lastAmpl = getAmplitude();
-  while (1) {
-    refPhase = phase;
-    getAmplitude();
-    float change = amplitude - lastAmpl;
-    printf("%.2f ", change);
-    if (fabs(change) < 0.1) break;
-    lastAmpl = amplitude;
-  }  
-
-  attenuation = -amplitude / 32767;
-  printf("\nAtten: %.5f\n", attenuation);
-
-  wavOutFilteredSquare(WavOutHz);
-  flushInBufs();
-}
 
 int main() {
-  startAudioIn(AudDeviceName);
+  setupAudioIn(AudDeviceName, &waveInCallback);
+
   startAudioOut(AudDeviceName);
-
-  calibrate();
+  startWaveIn();
   
+  // TODO: reduce playback level vs. clipping (42)
+  setPhase();
+  setPhase(); // TODO: check amplitude positive
+  setPhase();
+
+  thermPeak = -MaxVal;  // 25C
+  loopGain = -0.3f; // adjust for fast settling with small overhsoot
+
   while (1) {
-    static float last_t;
-    float t = temp(getAmplitude());
-    printf("%.4f %+.4f %d\n", t, t - last_t, phase);
-    last_t = t;
+    static time_t lastTm;
+    time_t tm = time(NULL);
+    if (tm != lastTm) {
+      lastTm = tm;
+      static float last_t;
+      float t = temp(); 
+      printf("%.4f %+.4f %.1f %+.1f\n", t, t - last_t, -thermPeak, loopGain * amplitude);
+      last_t = t;
 
-    if (abs(phase - refPhase) > 32 && fabs(amplitude) > 512)
-      calibrate();
-
-    if (_kbhit()) switch(_getch()) {
-      case 'c' : calibrate();
-      case 'p' : printf("%d %d\n", refPhase, phase); break; // check phase vs. refPhase: Note: extra 0-crossings near 0 amplitude (25°C)
-        // waveOut and waveIn clocks should be same, but beware missed buffer swaps?
+      char ch;
+      if (_kbhit()) switch(ch = _getch()) {
+        case 'p' : 
+          float savedThermPeak = thermPeak;
+          float savedGain = loopGain;
+          setPhase(); 
+          loopGain = savedGain;
+          thermPeak = savedThermPeak;
+          Sleep(SamplingMs);
+          thermPeak = savedThermPeak;
+          break;
+      }
     }
   }
   
@@ -477,21 +304,9 @@ int main() {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 # if 0
     char ch;
-    if(_kbhit()) switch(ch = _getch()) {
+    if(_kbhit()) switch(ch = _getch()) { // DC calibration -- with output caps removed
       case 'h' : wavOutDC(5, 5); break; // high
       case 'c' : wavOutDC((VoutMin + VoutMax)/2, (VoutMin + VoutMax)/2); break; // center
       case 'l' : wavOutDC(0, 0); break; // low
@@ -541,8 +356,8 @@ void setVolts(float leftV, float rightV, int secs = 5) {
   const float Vrange = Vmax - Vmin;
 
   struct {
-    short leftVal;
-    short rightVal;
+    short left;
+    short right;
   } sample = {max(0, min(1, (leftV  - Vmin) / Vrange)) * 65535 - 32768, 
               max(0, min(1, (rightV - Vmin) / Vrange)) * 65535 - 32768};
 
